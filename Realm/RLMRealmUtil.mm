@@ -20,9 +20,22 @@
 
 #import "RLMRealm_Private.hpp"
 
+#import <sys/event.h>
+#import <sys/stat.h>
+#import <sys/time.h>
+
+// A weak holder for an RLMRealm to allow calling performSelector:onThread:
+// without a strong reference to the realm
+@interface RLMWeakNotifier : NSObject {
+@public
+    int _fd;
+}
+@property (nonatomic, weak) RLMRealm *realm;
+- (instancetype)initWithRealm:(RLMRealm *)realm;
+@end
+
 // Global realm state
 static NSMutableDictionary *s_realmsPerPath = [NSMutableDictionary new];
-static NSMutableDictionary *s_notifiersPerPath = [NSMutableDictionary new];
 
 void RLMCacheRealm(RLMRealm *realm) {
     @synchronized(s_realmsPerPath) {
@@ -49,85 +62,73 @@ RLMRealm *RLMGetCurrentThreadCachedRealmForPath(NSString *path) {
 
 void RLMClearRealmCache() {
     @synchronized(s_realmsPerPath) {
-        for (NSMapTable *map in s_realmsPerPath.allValues) {
-            [map removeAllObjects];
-        }
         [s_realmsPerPath removeAllObjects];
-    }
-    @synchronized (s_notifiersPerPath) {
-        [s_notifiersPerPath removeAllObjects];
     }
 }
 
-// A weak holder for an RLMRealm to allow calling performSelector:onThread:
-// without a strong reference to the realm
-@interface RLMWeakNotifier : NSObject
-@property (nonatomic, weak) RLMRealm *realm;
-
-- (instancetype)initWithRealm:(RLMRealm *)realm;
-- (void)notifyOnTargetThread;
-@end
-
 void RLMStartListeningForChanges(RLMRealm *realm) {
-    @synchronized (s_notifiersPerPath) {
-        NSMapTable *notifiers = s_notifiersPerPath[realm.path];
-        if (!notifiers) {
-            notifiers = [NSMapTable mapTableWithKeyOptions:NSPointerFunctionsWeakMemory valueOptions:NSPointerFunctionsStrongMemory];
-            s_notifiersPerPath[realm.path] = notifiers;
-        }
-        [notifiers setObject:[[RLMWeakNotifier alloc] initWithRealm:realm] forKey:realm];
-    }
+    realm.notifier = [[RLMWeakNotifier alloc] initWithRealm:realm];
 }
 
 void RLMStopListeningForChanges(RLMRealm *realm) {
-    @synchronized (s_notifiersPerPath) {
-        NSMapTable *notifiers = s_notifiersPerPath[realm.path];
-        if (!notifiers) {
-            return;
-        }
-
-        [notifiers removeObjectForKey:realm];
-        if (!notifiers.objectEnumerator.nextObject) {
-            [s_notifiersPerPath removeObjectForKey:realm.path];
-        }
-    }
+    realm.notifier = nil;
 }
 
-void RLMNotifyOtherRealms(RLMRealm *notifyingRealm) {
-    @synchronized (s_notifiersPerPath) {
-        for (RLMWeakNotifier *notifier in [s_notifiersPerPath[notifyingRealm.path] objectEnumerator]) {
-            if (notifier.realm != notifyingRealm) {
-                [notifier notifyOnTargetThread];
-            }
-        }
+void RLMNotifyRealms(RLMRealm *notifyingRealm) {
+    // Commits during schema init happen before the notifier is created, which
+    // is okay because we explode if the file's schema is changed at a point
+    // when there's someone listening for a change
+    if (RLMWeakNotifier *notifier = notifyingRealm.notifier) {
+        futimes(notifier->_fd, nullptr);
     }
 }
 
 @implementation RLMWeakNotifier {
-    NSThread *_thread;
-    // flag used to avoid queuing up redundant notifications
-    std::atomic_flag _hasPendingNotification;
+@public
+    struct kevent _ke;
+    CFFileDescriptorRef _fdref;
+}
+
+static void RLMFileChanged(CFFileDescriptorRef fdref, CFOptionFlags, void *info) {
+    RLMWeakNotifier *self = (__bridge RLMWeakNotifier *)info;
+    struct kevent ev;
+    timespec timeout = {0, 0};
+    int ret = kevent(CFFileDescriptorGetNativeDescriptor(fdref), nullptr, 0, &ev, 1, &timeout);
+    assert(ret > 0);
+    if (RLMRealm *realm = self->_realm) {
+        CFFileDescriptorEnableCallBacks(fdref, kCFFileDescriptorReadCallBack);
+        [realm handleExternalCommit];
+    }
 }
 
 - (instancetype)initWithRealm:(RLMRealm *)realm {
     self = [super init];
     if (self) {
         _realm = realm;
-        _thread = [NSThread currentThread];
-        _hasPendingNotification.clear();
+
+        _fd = open(realm.path.UTF8String, O_EVTONLY);
+        if (_fd <= 0) abort();
+        int kq = kqueue();
+        if (kq <= 0) abort();
+
+        EV_SET(&_ke, _fd, EVFILT_VNODE, EV_ADD | EV_CLEAR, NOTE_ATTRIB, 0, 0);
+        kevent(kq, &_ke, 1, nullptr, 0, nullptr);
+
+        CFFileDescriptorContext context = {0, (__bridge void *)self, nullptr, nullptr, nullptr};
+        _fdref = CFFileDescriptorCreate(kCFAllocatorDefault, kq, true, RLMFileChanged, &context);
+
+        CFFileDescriptorEnableCallBacks(_fdref, kCFFileDescriptorReadCallBack);
+        CFRunLoopSourceRef source = CFFileDescriptorCreateRunLoopSource(kCFAllocatorDefault, _fdref, 0);
+        CFRunLoopAddSource(CFRunLoopGetCurrent(), source, kCFRunLoopDefaultMode);
+        CFRelease(source);
     }
     return self;
 }
 
-- (void)notify {
-    _hasPendingNotification.clear();
-    [_realm handleExternalCommit];
+- (void)dealloc {
+    CFFileDescriptorInvalidate(_fdref);
+    CFRelease(_fdref);
+    close(_fd);
 }
 
-- (void)notifyOnTargetThread {
-    if (!_hasPendingNotification.test_and_set()) {
-        [self performSelector:@selector(notify)
-                     onThread:_thread withObject:nil waitUntilDone:NO];
-    }
-}
 @end

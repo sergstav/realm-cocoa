@@ -167,7 +167,6 @@ static NSString * const c_defaultRealmFileName = @"default.realm";
     // Used for both
     Group *_group;
     BOOL _readOnly;
-    BOOL _inMemory;
 }
 
 + (BOOL)isCoreDebug {
@@ -552,7 +551,7 @@ static void CheckReadWrite(RLMRealm *realm, NSString *msg=@"Cannot write to a re
             _inWriteTransaction = NO;
 
             // notify other realm instances of changes
-            RLMNotifyOtherRealms(self);
+            RLMNotifyRealms(self);
 
             // send local notification
             [self sendNotifications:RLMRealmDidChangeNotification];
@@ -618,7 +617,9 @@ static void CheckReadWrite(RLMRealm *realm, NSString *msg=@"Cannot write to a re
               "pending changes have been rolled back. Make sure to retain a reference to the "
               "RLMRealm for the duration of the write transaction.");
     }
-    RLMStopListeningForChanges(self);
+    if (!_readOnly) {
+        RLMStopListeningForChanges(self);
+    }
 }
 
 - (void)handleExternalCommit {

@@ -31,6 +31,5 @@ void RLMClearRealmCache();
 
 void RLMStartListeningForChanges(RLMRealm *realm);
 void RLMStopListeningForChanges(RLMRealm *realm);
-// notify all of the Realms other than `notifyingRealm` at the same path as
-// `notifyingRealm` that a commit has occurred
-void RLMNotifyOtherRealms(RLMRealm *notifyingRealm);
+// notify all of the Realms at the same path as `notifyingRealm` that a commit has occurred
+void RLMNotifyRealms(RLMRealm *notifyingRealm);
