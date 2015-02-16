@@ -496,6 +496,8 @@ extern "C" {
     XCTAssertTrue(notificationFired);
 
     [realm removeNotification:token];
+
+    [realm cancelWriteTransaction];
 }
 
 - (void)testInMemoryRealm
@@ -893,6 +895,7 @@ extern "C" {
     dog.age = 10;
     XCTAssertNoThrow([realm addObjects:@[dog]], @"should allow RLMObject in array");
     XCTAssertEqual(1U, [[DogObject allObjectsInRealm:realm] count]);
+    [realm cancelWriteTransaction];
 }
 
 - (void)testWriteCopyOfRealm
