@@ -428,7 +428,7 @@ static RLMRealm *s_smallRealm, *s_mediumRealm, *s_largeRealm;
 
         dispatch_queue_t queue = dispatch_queue_create("background", 0);
         dispatch_semaphore_t sema = dispatch_semaphore_create(0);
-        dispatch_async(queue, ^{
+        dispatch_async(queue, ^{ @autoreleasepool {
             RLMRealm *realm = [RLMRealm inMemoryRealmWithIdentifier:@"test"];
             IntObject *obj = [[IntObject allObjectsInRealm:realm] firstObject];
             RLMNotificationToken *token = [realm addNotificationBlock:^(__unused NSString *note, __unused RLMRealm *realm) {
@@ -445,6 +445,7 @@ static RLMRealm *s_smallRealm, *s_mediumRealm, *s_largeRealm;
             }
 
             [realm removeNotification:token];
+        }
         });
 
         RLMNotificationToken *token = [realm addNotificationBlock:^(__unused NSString *note, __unused RLMRealm *realm) {
