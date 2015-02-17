@@ -81,12 +81,12 @@ void RLMNotifyRealms(RLMRealm *notifyingRealm) {
     // is okay because we explode if the file's schema is changed at a point
     // when there's someone listening for a change
     if (RLMWeakNotifier *notifier = notifyingRealm.notifier) {
-        futimes(notifier->_fd, nullptr);
+        char c = 0;
+        write(notifier->_fd, &c, 1);
     }
 }
 
 @implementation RLMWeakNotifier {
-    int _kq;
     CFRunLoopRef _runLoop;
     CFRunLoopSourceRef _signal;
     int _pipeFd[2];
@@ -98,20 +98,14 @@ void RLMNotifyRealms(RLMRealm *notifyingRealm) {
     if (self) {
         _realm = realm;
 
-        _fd = open(realm.path.UTF8String, O_EVTONLY);
+        NSString *path = [realm.path stringByAppendingString:@".note"];
+        mkfifo(path.UTF8String, 0777);
+        _fd = open(path.UTF8String, O_RDWR);
         if (_fd <= 0) abort();
-        _kq = kqueue();
-        if (_kq <= 0) abort();
 
         errno = 0;
         int e = pipe(_pipeFd);
-//        NSLog(@"err %d", errno);
         assert(e == 0);
-
-        struct kevent ke[2];
-        EV_SET(&ke[0], _fd, EVFILT_VNODE, EV_ADD | EV_CLEAR, NOTE_ATTRIB, 0, 0);
-        EV_SET(&ke[1], _pipeFd[0], EVFILT_READ, EV_ADD | EV_CLEAR, 0, 0, 0);
-        kevent(_kq, ke, 2, nullptr, 0, nullptr);
 
         _runLoop = CFRunLoopGetCurrent();
 
@@ -142,6 +136,14 @@ void RLMNotifyRealms(RLMRealm *notifyingRealm) {
 
 - (void)wait {
     dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
+        int _kq = kqueue();
+        if (_kq <= 0) abort();
+
+        struct kevent ke[2];
+        EV_SET(&ke[0], _fd, EVFILT_READ, EV_ADD | EV_CLEAR, 0, 0, 0);
+        EV_SET(&ke[1], _pipeFd[0], EVFILT_READ, EV_ADD | EV_CLEAR, 0, 0, 0);
+        kevent(_kq, ke, 2, nullptr, 0, nullptr);
+
         while (true) {
             struct kevent ev;
             int ret = kevent(_kq, nullptr, 0, &ev, 1, nullptr);
