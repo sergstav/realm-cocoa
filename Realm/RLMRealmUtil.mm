@@ -23,6 +23,7 @@
 #import <sys/event.h>
 #import <sys/stat.h>
 #import <sys/time.h>
+#import <unistd.h>
 
 // A weak holder for an RLMRealm to allow calling performSelector:onThread:
 // without a strong reference to the realm
@@ -32,6 +33,7 @@
 }
 @property (nonatomic, weak) RLMRealm *realm;
 - (instancetype)initWithRealm:(RLMRealm *)realm;
+- (void)stop;
 @end
 
 // Global realm state
@@ -71,7 +73,7 @@ void RLMStartListeningForChanges(RLMRealm *realm) {
 }
 
 void RLMStopListeningForChanges(RLMRealm *realm) {
-    realm.notifier = nil;
+    [realm.notifier stop];
 }
 
 void RLMNotifyRealms(RLMRealm *notifyingRealm) {
@@ -84,21 +86,11 @@ void RLMNotifyRealms(RLMRealm *notifyingRealm) {
 }
 
 @implementation RLMWeakNotifier {
-@public
-    struct kevent _ke;
-    CFFileDescriptorRef _fdref;
-}
-
-static void RLMFileChanged(CFFileDescriptorRef fdref, CFOptionFlags, void *info) {
-    RLMWeakNotifier *self = (__bridge RLMWeakNotifier *)info;
-    struct kevent ev;
-    timespec timeout = {0, 0};
-    int ret = kevent(CFFileDescriptorGetNativeDescriptor(fdref), nullptr, 0, &ev, 1, &timeout);
-    assert(ret > 0);
-    if (RLMRealm *realm = self->_realm) {
-        CFFileDescriptorEnableCallBacks(fdref, kCFFileDescriptorReadCallBack);
-        [realm handleExternalCommit];
-    }
+    int _kq;
+    CFRunLoopRef _runLoop;
+    CFRunLoopSourceRef _signal;
+    int _pipeFd[2];
+    bool _cancel;
 }
 
 - (instancetype)initWithRealm:(RLMRealm *)realm {
@@ -108,27 +100,64 @@ static void RLMFileChanged(CFFileDescriptorRef fdref, CFOptionFlags, void *info)
 
         _fd = open(realm.path.UTF8String, O_EVTONLY);
         if (_fd <= 0) abort();
-        int kq = kqueue();
-        if (kq <= 0) abort();
+        _kq = kqueue();
+        if (_kq <= 0) abort();
 
-        EV_SET(&_ke, _fd, EVFILT_VNODE, EV_ADD | EV_CLEAR, NOTE_ATTRIB, 0, 0);
-        kevent(kq, &_ke, 1, nullptr, 0, nullptr);
+        errno = 0;
+        int e = pipe(_pipeFd);
+//        NSLog(@"err %d", errno);
+        assert(e == 0);
 
-        CFFileDescriptorContext context = {0, (__bridge void *)self, nullptr, nullptr, nullptr};
-        _fdref = CFFileDescriptorCreate(kCFAllocatorDefault, kq, true, RLMFileChanged, &context);
+        struct kevent ke[2];
+        EV_SET(&ke[0], _fd, EVFILT_VNODE, EV_ADD | EV_CLEAR, NOTE_ATTRIB, 0, 0);
+        EV_SET(&ke[1], _pipeFd[0], EVFILT_READ, EV_ADD | EV_CLEAR, 0, 0, 0);
+        kevent(_kq, ke, 2, nullptr, 0, nullptr);
 
-        CFFileDescriptorEnableCallBacks(_fdref, kCFFileDescriptorReadCallBack);
-        CFRunLoopSourceRef source = CFFileDescriptorCreateRunLoopSource(kCFAllocatorDefault, _fdref, 0);
-        CFRunLoopAddSource(CFRunLoopGetCurrent(), source, kCFRunLoopDefaultMode);
-        CFRelease(source);
+        _runLoop = CFRunLoopGetCurrent();
+
+        CFRunLoopSourceContext ctx{};
+        ctx.info = (__bridge void *)self;
+        ctx.perform = [](void *info) {
+            RLMWeakNotifier *notifier = (__bridge RLMWeakNotifier *)info;
+            if (RLMRealm *realm = notifier->_realm) {
+                [realm handleExternalCommit];
+            }
+        };
+        _signal = CFRunLoopSourceCreate(0, 0, &ctx);
+        CFRunLoopAddSource(_runLoop, _signal, kCFRunLoopDefaultMode);
+        CFRelease(_signal);
+
+        [self wait];
     }
     return self;
 }
 
-- (void)dealloc {
-    CFFileDescriptorInvalidate(_fdref);
-    CFRelease(_fdref);
-    close(_fd);
+- (void)stop {
+    // wake up the kqueue
+    _cancel = true;
+    char c = 0;
+    int ret = write(_pipeFd[1], &c, 1);
+    assert(ret == 1);
+}
+
+- (void)wait {
+    dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
+        while (true) {
+            struct kevent ev;
+            int ret = kevent(_kq, nullptr, 0, &ev, 1, nullptr);
+            assert(ret > 0);
+            if (ev.ident == _pipeFd[0]) {
+                CFRunLoopSourceInvalidate(_signal);
+                close(_fd);
+                close(_pipeFd[0]);
+                close(_pipeFd[1]);
+                close(_kq);
+                return;
+            }
+            CFRunLoopSourceSignal(_signal);
+            CFRunLoopWakeUp(_runLoop);
+        }
+    });
 }
 
 @end
