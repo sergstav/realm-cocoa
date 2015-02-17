@@ -29,7 +29,7 @@
 }
 @end
 
-#if !DEBUG
+//#if !DEBUG
 
 @interface PerformanceTests : RLMTestCase
 @end
@@ -41,9 +41,9 @@ static RLMRealm *s_smallRealm, *s_mediumRealm, *s_largeRealm;
 + (void)setUp {
     [super setUp];
 
-    s_smallRealm = [self createStringObjects:1];
-    s_mediumRealm = [self createStringObjects:5];
-    s_largeRealm = [self createStringObjects:50];
+//    s_smallRealm = [self createStringObjects:1];
+//    s_mediumRealm = [self createStringObjects:5];
+//    s_largeRealm = [self createStringObjects:50];
 }
 
 + (void)tearDown {
@@ -485,4 +485,4 @@ static RLMRealm *s_smallRealm, *s_mediumRealm, *s_largeRealm;
 
 @end
 
-#endif
+//#endif
